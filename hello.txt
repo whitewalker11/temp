@@ -1,0 +1,37 @@
+def _find_peak_hardware_metrics(self, workload, data, metric_type='gpu'):
+    """
+    Finds the maximum utilization recorded DURING the workload's execution window.
+    """
+    node_id = workload.get('node_id')
+    start_ts = datetime.fromisoformat(workload['timestamp'])
+    # total_time_seconds includes queue + processing
+    end_ts = start_ts + timedelta(seconds=workload.get('total_time_seconds', 0))
+    
+    hardware_list = data.get(f'{metric_type}_by_node', {}).get(node_id, [])
+    
+    relevant_snapshots = []
+    for hw in hardware_list:
+        hw_ts = datetime.fromisoformat(hw['timestamp'])
+        # Check if the hardware snapshot falls within the workload window
+        if start_ts <= hw_ts <= end_ts:
+            relevant_snapshots.append(hw)
+            
+    if not relevant_snapshots:
+        # Fallback to nearest neighbor if no snapshot fell exactly in the window
+        return self._find_matching_hardware(workload, data, metric_type)
+
+    # Extract Peak Values
+    peak_util = 0
+    peak_mem = 0
+    for snap in relevant_snapshots:
+        for g in snap.get('gpus', []):
+            if workload.get('device_name') and g['name'] in workload['device_name']:
+                peak_util = max(peak_util, g['utilization']['gpu_pct'])
+                peak_mem = max(peak_mem, g['memory']['utilization_pct'])
+                
+    return {
+        'utilization': {'gpu_pct': peak_util},
+        'memory': {'utilization_pct': peak_mem},
+        'is_peak': True,
+        'snapshot_count': len(relevant_snapshots)
+    }
