@@ -1,72 +1,99 @@
-import pandas as pd
-import numpy as np
 from pymongo import MongoClient
 from datetime import datetime, timedelta
+import pandas as pd
+import numpy as np
 from scipy.stats import pearsonr
 from collections import defaultdict
 import json
 
 class AIObservabilityCorrelator:
     def __init__(self, mongo_uri="192.168.20.8:27018", db_name="AI-observability"):
-        self.client = MongoClient(f"mongodb://admin:admin@{mongo_uri}/ot_database?authSource=ot_database")
+        # Formatting URI for admin authentication if needed
+        full_uri = f"mongodb://admin:admin@{mongo_uri}/ot_database?authSource=ot_database"
+        self.client = MongoClient(full_uri)
         self.db = self.client[db_name]
 
-    def get_time_aligned_data(self, window_min):
+    def get_time_aligned_data(self, time_window_minutes=60):
+        """Fetch and align data with intelligent timestamp matching"""
         end_time = datetime.utcnow()
-        start_time = end_time - timedelta(minutes=window_min)
-        query = {'timestamp': {'$gte': start_time.isoformat(), '$lte': end_time.isoformat()}}
+        start_time = end_time - timedelta(minutes=time_window_minutes)
         
-        raw = {
+        # Determine if your DB uses Strings or BSON Dates
+        sample = self.db['AI-workloads-real'].find_one()
+        if not sample: return None
+        
+        is_string = isinstance(sample['timestamp'], str)
+        t_start = start_time.isoformat() if is_string else start_time
+        t_end = end_time.isoformat() if is_string else end_time
+        
+        query = {'timestamp': {'$gte': t_start, '$lte': t_end}}
+        
+        data = {
             'workloads': list(self.db['AI-workloads-real'].find(query)),
-            'gpu': list(self.db['Hardware-gpu'].find(query))
+            'gpu': list(self.db['Hardware-gpu'].find(query)),
+            'cpu': list(self.db['Hardware-cpu'].find(query)),
+            'memory': list(self.db['Hardware-memory'].find(query))
         }
         
-        indexed = {'gpu_by_node': defaultdict(list), 'workloads_by_node': defaultdict(list), 'all_nodes': set()}
-        for g in raw['gpu']:
-            indexed['gpu_by_node'][g.get('node_id')].append(g)
-            indexed['all_nodes'].add(g.get('node_id'))
-        for w in raw['workloads']:
-            indexed['workloads_by_node'][w.get('node_id')].append(w)
-            indexed['all_nodes'].add(w.get('node_id'))
-        
-        return indexed
+        if not data['workloads']: return None
+        return self._build_node_index(data)
 
-    def _get_peak_gpu(self, workload, indexed_data):
+    def _build_node_index(self, data):
+        indices = {f"{k}_by_node": defaultdict(list) for k in ['gpu', 'cpu', 'memory', 'workloads']}
+        for key in ['gpu', 'cpu', 'memory', 'workloads']:
+            for item in data[key]:
+                indices[f"{key}_by_node"][item.get('node_id', 'unknown')].append(item)
+        
+        indices.update(data)
+        indices['all_nodes'] = set(indices['workloads_by_node'].keys())
+        return indices
+
+    def _find_peak_gpu(self, workload, data):
+        """Finds the peak GPU utilization during the request's specific lifecycle"""
         node_id = workload.get('node_id')
         start_ts = datetime.fromisoformat(workload['timestamp'])
+        # Window based on total time (Queue + Processing)
         end_ts = start_ts + timedelta(seconds=workload.get('total_time_seconds', 0))
         
-        snaps = indexed_data['gpu_by_node'].get(node_id, [])
+        gpu_snaps = data.get('gpu_by_node', {}).get(node_id, [])
         peaks = [0]
-        for s in snaps:
-            ts = datetime.fromisoformat(s['timestamp'])
-            if start_ts <= ts <= end_ts:
-                for g in s.get('gpus', []):
+        
+        for snap in gpu_snaps:
+            snap_ts = datetime.fromisoformat(snap['timestamp'])
+            if start_ts <= snap_ts <= end_ts:
+                for g in snap.get('gpus', []):
                     peaks.append(g['utilization']['gpu_pct'])
         return max(peaks)
 
-    def generate_detailed_report(self, window):
+    def generate_all_correlations(self, window):
         data = self.get_time_aligned_data(window)
-        if not data['workloads_by_node']: return None
+        if not data: return None
+        
+        # Calculation for Model Efficiency
+        model_results = defaultdict(lambda: {'tps': [], 'peaks': [], 'q_time': [], 'cost': 0, 'reqs': 0})
+        for w in data['workloads']:
+            m = w['model_name']
+            peak = self._find_peak_gpu(w, data)
+            model_results[m]['tps'].append(w['tokens_per_second'])
+            model_results[m]['peaks'].append(peak)
+            model_results[m]['q_time'].append(w['queue_time_seconds'])
+            model_results[m]['cost'] += w['cost_usd']
+            model_results[m]['reqs'] += 1
 
-        model_summary = defaultdict(lambda: {'tps': [], 'peaks': [], 'q_time': []})
-        for w in data['workloads_by_node'].get('all_nodes', data['workloads_by_node']): # Handle indexing fallback
-            for req in (data['workloads_by_node'][w] if isinstance(data['workloads_by_node'], dict) else []):
-                m = req['model_name']
-                peak = self._get_peak_gpu(req, data)
-                model_summary[m]['tps'].append(req['tokens_per_second'])
-                model_summary[m]['peaks'].append(peak)
-                model_summary[m]['q_time'].append(req['queue_time_seconds'])
-
-        results = []
-        for model, stats in model_summary.items():
-            avg_tps = np.mean(stats['tps'])
-            avg_peak = np.mean(stats['peaks'])
-            results.append({
-                'name': model,
-                'tps': avg_tps,
-                'peak_gpu': avg_peak,
-                'density': avg_tps / (avg_peak + 1),
-                'queue_impact': np.mean(stats['q_time'])
+        efficiency = []
+        for model, s in model_results.items():
+            avg_tps = np.mean(s['tps'])
+            avg_peak = np.mean(s['peaks'])
+            efficiency.append({
+                'model_name': model,
+                'efficiency_score': (avg_tps * 100) / (avg_peak + 1),
+                'avg_tps': avg_tps,
+                'avg_peak_gpu': avg_peak,
+                'avg_q_time': np.mean(s['q_time'])
             })
-        return results
+
+        return {
+            'efficiency': sorted(efficiency, key=lambda x: x['efficiency_score'], reverse=True),
+            'active_nodes': list(data['all_nodes']),
+            'total_requests': len(data['workloads'])
+        }
