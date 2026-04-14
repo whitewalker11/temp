@@ -1,47 +1,55 @@
 import argparse
+import sys
 from metrics import AIObservabilityCorrelator
 from datetime import datetime
 
-def print_summary(metrics_list):
+def print_summary(metrics):
+    if not metrics:
+        print("⚠️ No data found in the specified window. Check your DB timestamps.")
+        return
+
     print("\n" + "█"*80)
-    print(f"   AI OBSERVABILITY DASHBOARD | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"   AI OBSERVABILITY PEAK REPORT | {datetime.now().strftime('%H:%M:%S')}")
     print("█"*80)
 
-    # Section 1: Model Performance & Efficiency Idea
-    print(f"\n[1] MODEL EFFICIENCY & CONCURRENCY DENSITY")
-    print("IDEA: Measures 'Tokens per GPU Cycle'. High Density means the model is ")
-    print("      generating text efficiently without wasting hardware compute.")
-    print(f"   {'Model Name':<18} | {'Tkn/sec':<10} | {'Peak GPU':<10} | {'Density'}")
-    print(f"   {'-'*65}")
-    for m in metrics_list:
-        print(f" • {m['name']:<18} | {m['tps']:>8.2f} | {m['peak_gpu']:>8.1f}% | {m['density']:>8.2f}")
+    # Section 1: System Overview
+    print(f"\n[1] SYSTEM OVERVIEW")
+    print(f" • Total Requests: {metrics['total_requests']} | Active Nodes: {', '.join(metrics['active_nodes'])}")
 
-    # Section 2: Infrastructure Saturation Idea
-    print(f"\n[2] SYSTEM SATURATION ANALYSIS")
-    print("IDEA: Compares Queue Wait Time vs. Hardware Load. If Peak GPU is 100% ")
-    print("      and Density is low, the node is saturated and requires scaling.")
-    
-    for m in metrics_list:
-        if m['peak_gpu'] > 85:
-            print(f" ⚠️ ALERT: {m['name']} is hitting Hardware Ceiling ({m['peak_gpu']:.1f}%).")
-        if m['queue_impact'] > 0.5:
-            print(f" ⏳ DELAY: High Queue impact detected for {m['name']} ({m['queue_impact']:.2f}s).")
+    # Section 2: Model Density & Efficiency
+    print(f"\n[2] MODEL EFFICIENCY & CONCURRENCY DENSITY")
+    print("💡 IDEA: Measures 'Tokens per GPU Cycle'. High density means your kernels")
+    print("   are saturated correctly. Low density suggests a memory bottleneck.")
+    print(f"   {'Model Name':<18} | {'Tkn/sec':<10} | {'Peak GPU':<10} | {'Status'}")
+    print(f"   {'-'*60}")
+    for m in metrics['efficiency']:
+        status = "⚠️ BOTTLENECK" if m['avg_peak_gpu'] > 90 else "✅ OPTIMAL"
+        print(f" • {m['model_name']:<18} | {m['avg_tps']:>8.2f} | {m['avg_peak_gpu']:>8.1f}% | {status}")
 
-    # Section 3: Cost & Resource Alignment
-    print(f"\n[3] RESOURCE ALIGNMENT (UNIT ECONOMICS)")
-    print("IDEA: Correlates user requests to physical node IDs to find 'Noisy Neighbors'.")
-    print("      Helps identify which node is causing bottlenecks in your Linux cluster.")
+    # Section 3: Saturation Insights
+    print(f"\n[3] INFRASTRUCTURE SATURATION HINTS")
+    print("💡 IDEA: If Avg Queue Time > 0.5s, your node is hitting the 'Breaking Point'.")
+    for m in metrics['efficiency']:
+        if m['avg_q_time'] > 0.5:
+            print(f" 🔥 ALERT: {m['name']} is stalling. Avg Queue: {m['avg_q_time']:.4f}s")
+        else:
+            print(f" 🟢 STABLE: {m['model_name']} processing smoothly.")
 
     print("\n" + "█"*80 + "\n")
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--window', type=int, default=30)
+    parser.add_argument('--window', type=int, default=30, help='Window in minutes')
+    parser.add_argument('--uri', default='192.168.20.8:27018')
     args = parser.parse_args()
 
-    correlator = AIObservabilityCorrelator()
-    report = correlator.generate_detailed_report(args.window)
-    if report:
+    try:
+        correlator = AIObservabilityCorrelator(mongo_uri=args.uri)
+        print(f"Analyzing last {args.window} minutes of data...")
+        report = correlator.generate_all_correlations(args.window)
         print_summary(report)
-    else:
-        print("No workload data found in the specified window.")
+    except Exception as e:
+        print(f"❌ Error during execution: {e}")
+
+if __name__ == "__main__":
+    main()
