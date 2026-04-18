@@ -19,9 +19,7 @@ def get_gpu_efficiency(db, match):
 
     pipeline = [
         {"$match": match},
-
         {"$unwind": "$gpus"},
-
         {
             "$group": {
                 "_id": None,
@@ -41,25 +39,32 @@ def get_gpu_efficiency(db, match):
     return {
         "avg_gpu_utilization": r.get("avg_gpu_util", 0),
         "avg_gpu_memory_mb": r.get("avg_gpu_mem", 0),
-
-        # efficiency heuristic
-        "gpu_efficiency_score": (
-            r.get("avg_gpu_util", 0) / 100
-        )
+        "gpu_efficiency_score": r.get("avg_gpu_util", 0) / 100
     }
-    
-    
+
+
+# 🔥 FIXED FUNCTION
 def get_gpu_time_series_10s(db, match):
 
     pipeline = [
         {"$match": match},
+
         {"$unwind": "$gpus"},
+
+        # 🔥 convert STRING → DATE
+        {
+            "$addFields": {
+                "timestamp_dt": {
+                    "$toDate": "$timestamp"
+                }
+            }
+        },
 
         {
             "$group": {
                 "_id": {
                     "$dateTrunc": {
-                        "date": "$timestamp",
+                        "date": "$timestamp_dt",
                         "unit": "second",
                         "binSize": 10
                     }
